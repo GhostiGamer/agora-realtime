@@ -1,0 +1,15 @@
+# Para Coolify (tipo «Docker Compose») o para levantarlo a mano con: docker compose up -d
+services:
+  realtime:
+    build: .
+    restart: unless-stopped
+    environment:
+      - RT_SECRET=${RT_SECRET}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-https://agoraai.dev,https://www.agoraai.dev}
+      - MAX_CONN=${MAX_CONN:-1500}
+    expose:
+      - "8080"
+    # límites para que nunca se coma el servidor
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64

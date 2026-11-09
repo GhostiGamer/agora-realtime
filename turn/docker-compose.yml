@@ -1,0 +1,29 @@
+# OPCIONAL · servidor TURN propio (coturn) para las llamadas de voz.
+# Solo hace falta si NO usas el TURN gratuito de Cloudflare. Ver README.
+services:
+  coturn:
+    image: coturn/coturn:4.6.2
+    restart: unless-stopped
+    network_mode: host          # TURN necesita UDP directo; por eso no pasa por Coolify/Traefik
+    mem_limit: 256m
+    cpus: 0.5
+    command:
+      - -n
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49200        # rango pequeño: como mucho ~20 llamadas retransmitidas a la vez
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET}
+      - --realm=agoraai.dev
+      - --external-ip=${PUBLIC_IP}
+      - --no-tls
+      - --no-dtls
+      - --no-cli
+      - --no-multicast-peers
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --user-quota=8
+      - --total-quota=60
+      - --max-bps=96000         # unos 96 kbps por llamada: de sobra para voz
+      - --log-file=stdout

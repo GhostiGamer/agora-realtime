@@ -1,0 +1,11 @@
+{
+  "name": "agora-realtime",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Servidor de tiempo real de ÁGORA: presencia en la sala, chat de sala, carreras y señalización de llamadas",
+  "main": "server.mjs",
+  "scripts": { "start": "node server.mjs" },
+  "engines": { "node": ">=20" },
+  "dependencies": { "ws": "8.18.0" }
+}
