@@ -29,12 +29,15 @@ const room = (name) => { let r = rooms.get(name); if (!r) { r = { members: new S
 // Billete firmado por Netlify: quién eres y en qué grupos estás
 function verify(tk) {
   if (!tk || typeof tk.uid !== 'string' || !Array.isArray(tk.gids) || typeof tk.sig !== 'string') return null;
+  const prids = Array.isArray(tk.prids) ? tk.prids : [];
   if (!(Number(tk.exp) > now())) return null;
-  const want = crypto.createHmac('sha256', SECRET).update(`${tk.uid}|${tk.gids.join(',')}|${tk.exp}`).digest('hex');
+  const want = crypto.createHmac('sha256', SECRET).update(`${tk.uid}|${tk.gids.join(',')}|${prids.join(',')}|${tk.exp}`).digest('hex');
   if (want.length !== tk.sig.length || !crypto.timingSafeEqual(Buffer.from(want), Buffer.from(tk.sig))) return null;
-  return { uid: tk.uid.slice(0, 64), gids: new Set(tk.gids.map(Number)) };
+  return { uid: tk.uid.slice(0, 64), gids: new Set(tk.gids.map(Number)), prids: new Set(prids.map(Number)) };
 }
 
+// salas privadas (p-<id>): solo quien tenga la sala en su billete
+const canRoom = (c, name) => !name.startsWith('p-') || (c.prids && c.prids.has(Number(name.slice(2))));
 function leaveRoom(c) { if (!c.room) return; const r = rooms.get(c.room); if (r) { r.members.delete(c); r.dirty = true; } c.room = null; }
 function leaveVoice(c) { if (!c.vgid) return; const v = voice.get(c.vgid); if (v) { v.delete(c); if (!v.size) voice.delete(c.vgid); else voiceMembers(c.vgid); } c.vgid = null; }
 function voiceMembers(gid) { const v = voice.get(gid); if (!v) return; const members = [...new Set([...v].map(x => x.uid))]; for (const x of v) send(x, { t: 'vmem', gid, members }); }
@@ -49,24 +52,25 @@ function onMessage(c, raw) {
   if (!c.uid) {
     if (m.t !== 'hello') return;
     const who = verify(m.tk); if (!who) return c.ws.close(4001, 'billete no válido');
-    c.uid = who.uid; c.gids = who.gids;
+    c.uid = who.uid; c.gids = who.gids; c.prids = who.prids;
     if (!byUid.has(c.uid)) byUid.set(c.uid, new Set()); byUid.get(c.uid).add(c);
     send(c, { t: 'ok' }); return;
   }
   switch (m.t) {
-    case 'tk': { const who = verify(m.tk); if (who && who.uid === c.uid) c.gids = who.gids; break; }
+    case 'tk': { const who = verify(m.tk); if (who && who.uid === c.uid) { c.gids = who.gids; c.prids = who.prids; } break; }
     case 'st': {   // estado en la portada y en la sala
       if (!sizeOk(m.lobby, MAX_STATE) || !sizeOk(m.state, MAX_STATE)) return;
       c.lobby = m.lobby || {}; lobbyDirty = true;
-      const want = typeof m.room === 'string' ? m.room.slice(0, 40) : null;
+      let want = typeof m.room === 'string' ? m.room.slice(0, 40) : null;
+      if (want && !canRoom(c, want)) want = null;
       if (want !== c.room) { leaveRoom(c); if (want) { c.room = want; room(want).members.add(c); } }
       c.state = want ? (m.state || {}) : null; if (c.room) room(c.room).dirty = true;
       break;
     }
-    case 'hist': { const r = rooms.get(String(m.room || '')); send(c, { t: 'hist', room: m.room, list: r ? r.hist : [] }); break; }
+    case 'hist': { if (!canRoom(c, String(m.room || ''))) return; const r = rooms.get(String(m.room || '')); send(c, { t: 'hist', room: m.room, list: r ? r.hist : [] }); break; }
     case 'chat': {
       const name = String(m.room || '').slice(0, 40), text = String(m.text || '').trim().slice(0, 300);
-      if (!name || !text || name.startsWith('g-')) return;
+      if (!name || !text || name.startsWith('g-') || !canRoom(c, name)) return;
       if (t - (c.lastChat || 0) < 1200) return; c.lastChat = t;
       const msg = { uid: c.uid, ts: t, t: text, nick: String(m.nick || '').slice(0, 16), c: String(m.c || '').slice(0, 9) };
       const r = room(name); r.hist.push(msg); if (r.hist.length > MAX_HIST) r.hist.shift();
@@ -76,7 +80,11 @@ function onMessage(c, raw) {
     }
     case 'vjoin': {
       const gid = Number(m.gid); if (!c.gids.has(gid)) return send(c, { t: 'verr', gid });
-      leaveVoice(c); c.vgid = gid; if (!voice.has(gid)) voice.set(gid, new Set()); voice.get(gid).add(c); voiceMembers(gid); break;
+      leaveVoice(c); const was = voice.has(gid) ? [...voice.get(gid)].some(x => x.uid !== c.uid) : false;
+      c.vgid = gid; if (!voice.has(gid)) voice.set(gid, new Set()); voice.get(gid).add(c); voiceMembers(gid);
+      // primera persona en la llamada: avisa al resto del grupo que esté conectado
+      if (!was) { const nick = String(m.nick || '').slice(0, 16); for (const x of clients) if (x !== c && x.uid !== c.uid && x.gids && x.gids.has(gid) && x.vgid !== gid) send(x, { t: 'ring', gid, from: c.uid, nick }); }
+      break;
     }
     case 'vleave': leaveVoice(c); break;
     case 'vsig': {
@@ -115,7 +123,7 @@ server.on('upgrade', (req, socket, head) => {
   const okOrigin = ORIGINS.includes(origin) || /^https:\/\/[a-z0-9-]+--?[a-z0-9-]*\.netlify\.app$/.test(origin) || /^http:\/\/localhost(:\d+)?$/.test(origin);
   if (!okOrigin || clients.size >= MAX_CONN || (perIp.get(ip) || 0) >= MAX_PER_IP) { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); return socket.destroy(); }
   wss.handleUpgrade(req, socket, head, (ws) => {
-    const c = { ws, ip, uid: null, gids: new Set(), lobby: {}, room: null, state: null, vgid: null, tokens: BURST, last: now(), dropped: 0, alive: true };
+    const c = { ws, ip, uid: null, gids: new Set(), prids: new Set(), lobby: {}, room: null, state: null, vgid: null, tokens: BURST, last: now(), dropped: 0, alive: true };
     clients.add(c); perIp.set(ip, (perIp.get(ip) || 0) + 1);
     const hello = setTimeout(() => { if (!c.uid) ws.close(4000, 'sin saludo'); }, 10000);
     ws.on('pong', () => { c.alive = true; });
